@@ -1,0 +1,633 @@
+---
+title: "Statistical Learning Mod.B - Project"
+
+output: html_document
+---
+# ANOMALY DETECTION USING DATA VISUALIZATION AND CLUSTERING
+
+# ----------------------------------------------------------
+
+# I. Abstract:
+
+In 2018, there was a scandal in the national exam in Vietnam. The local Department of Education in a province named Ha Giang was found correcting the final scores of some students. The investigation was carried out and there were some government officials had been convicted. 
+
+In this experiment, I am going to look into the score data of all students nationwide, published by the Vietnam Ministry of Education. By using some statistical and data visualization methods and unsupervised clustering, we will try to find some anomalies in the data without affecting the bias of the investigation and conviction. In the scope of this experiment, we only try to find the odds, not try to explain or to solve the problems detected. 
+
+# II. Analysis
+
+```{r}
+
+# loading libraries
+packages <- c("xml2", "rvest", "stats", "ggplot2", "tidyverse", "stringi", "viridisLite", "ggridges", "viridis", "cluster", "factoextra", "lvplot", "mclust", "zoo", "xts", "PerformanceAnalytics", "gtools", "ClusterR")
+
+lapply(packages, require, character.only = TRUE)
+```
+
+# 1. Importing and preprocessing data.
+
+```{r}
+# url for collecting data of provinces' names and local Department of Education
+url <- "https://thuvienphapluat.vn/cong-van/Giao-duc/Cong-van-417-BGDDT-KTKDCLGD-huong-dan-thuc-hien-Quy-che-thi-trung-hoc-pho-thong-quoc-gia-2017-339311.aspx"
+
+# Collect data: 
+
+url %>% 
+  read_html() %>% 
+  html_nodes(xpath = '//*[@id="divContentDoc"]/div/div/div/table[7]') %>% 
+  html_table() %>% 
+  .[[1]] -> df1
+```
+
+
+```{r}
+dim(df1)
+head(df1)
+```
+
+
+```{r}
+# convert text to Latin character
+df1 %>%
+  mutate_all(function(x) {stri_trans_general(x, "Latin-ASCII")}) %>%
+  slice(-1) -> df1
+
+# rename columns
+df1 %>% 
+  select(code = X1, province = X2) %>%
+  mutate(province = str_replace_all(province, "So GDDT", "")) -> df1
+
+head(df1)
+```
+
+
+```{r}
+# load score data
+# https://drive.google.com/open?id=1sfNYul5AUzuJg8YbDm4DV8gMJKuF5tbw
+system("gdown --id 1sfNYul5AUzuJg8YbDm4DV8gMJKuF5tbw")
+df2 <- read_csv("THPT 2018 Quoc gia.csv")
+```
+
+
+```{r}
+dim(df2)
+head(df2)
+```
+
+
+```{r}
+# if student identification number has 0 as the first digit, it will be deleted. 
+# So we add zero to these cases to recover the original numbers
+# extract province code from student identification number and rename some columns 
+df2 %>% 
+  mutate(SoBD = as.character(SoBD)) %>% 
+  mutate(SoBD = case_when(str_count(SoBD) == 7 ~ paste0("0", SoBD), TRUE ~ SoBD)) %>% 
+  mutate(code = str_sub(SoBD, start = 1, end = 2)) %>%
+  select(SIN = SoBD, code, Math, Viet, English, Physics, Chemistry, Biology, History, Geography, Civic_Education = GDCD, optionA = KhoiA, optionB = KhoiB, optionC = KhoiC, optionD = KhoiD, optionA1 = KhoiA1) -> df2
+
+```
+
+
+```{r}
+# join 2 datasets: the data of province names (df1) and score data (df2)
+left_join(df2, df1, by = "code") -> df
+dim(df)
+head(df)
+```
+
+
+The dataset is the full score of every student by subjects they took. The following explanation gives detail about the column name and its content:
+
+SIN: Student ID
+
+code: Province code
+
+Math: Score of Math
+
+Viet: Score of Vietnamese Language
+
+English: Score of English Language
+
+Physics: Score of Physics
+
+Chemistry: Score of Chemistry
+
+Biology: Score of Biology
+
+History: Score of History
+
+Geography: Score of Geography
+
+Civic_Education: Score of Civic Education
+
+optionA: Sum of Math, Physics and Chemistry score
+
+optionB: Sum of Math, Chemistry and Biology score
+
+optionC: Sum of Viet, History and Geography score
+
+optionD: Sum of Math, Viet and English score
+
+province: Province Name
+
+
+For the examination, each student will not take all of the subjects, but they only take some of them based on their initial choice (option). Math, Viet and English are 3 compulsory exams. Thus, for each data point, there will be some N/A values.
+
+After obtain the final data, we can plot some graphs to visualize the distribution of Math exam score in Ha Giang Province and the rest of the nation. 
+
+# 2. Analysis
+2a. Statistical investigation
+
+Firstly, we may try to find some odds in the data statistically. 
+
+```{r}
+df %>% 
+  select(Math) %>%
+  filter(Math == 0.0) -> ms
+
+count(ms)
+```
+
+The Math exam has 50 multiple choice questions. Each question has 4 options. Thus, the probability of getting a wrong answer for each question is 3/4. The probability one student did wrong all of the 50 question is:
+
+```{r}
+p = (3/4)^50
+p
+```
+
+There are 744,396 students taking the exam. Let x be the number of students who got 0 score. By binomial distribution, we have:
+
+```{r}
+n <- 744396
+mean_x <- n * p
+std_x <- sqrt(n * p * (1 - p))
+print(mean_x)
+print(std_x)
+```
+
+We use two parameters above to calculate the probability of 830 students who got 0:
+
+```{r}
+1 - pnorm(830, mean = mean_x, sd = std_x)
+```
+
+The result we got is 0. In another way, the expected value of number of students who got 0 among 1 million students is only 3. But in reality, this examination got 830. This is the anomaly.
+
+
+```{r}
+df %>% 
+  filter(str_detect(province, "Ha Giang") == FALSE) %>%
+  select(Math : Geography) -> nation_sub
+ 
+df %>% 
+  filter(str_detect(province,"Ha Giang")) %>%
+  select(Math : Geography) -> hg_sub
+```
+
+
+```{r}
+chart.Correlation(nation_sub, histogram = TRUE, pch = 19)
+
+chart.Correlation(hg_sub, histogram = TRUE, pch = 19)
+
+```
+
+Another way to see the odd is to plot the correlation matrix of nation and Ha Giang data. We can assume the correlation in the nation data as the standard. We can see some anomalies, such as the correlation metrics between Math and Biology in nation data is 0.36, while in the Ha Giang data, it is only 0.13.
+
+
+2b. Exploratory Data Analysis:
+
+```{r}
+# filter Ha Giang Province and the rest of the nation data
+df %>%
+  filter(str_detect(province,"Ha Giang")) -> hg_data
+df %>%
+  filter(str_detect(province, "Ha Giang") == FALSE) -> nation_data
+```
+
+
+```{r}
+hg_data %>%
+  gather(Math : Geography, key="Subject", value = "Score") %>%
+  ggplot() +
+  geom_density_ridges_gradient(aes(x = Score, y = reorder(Subject, Score), fill = ..x..), scale = 1, show.legend = T) +
+  scale_fill_viridis(option = "E") +
+  labs(y = "Subject") +
+  ggtitle("Ha Giang") +
+  theme_minimal()
+
+```
+
+```{r}
+nation_data %>%
+  gather(Math : Geography, key = "Subject", value = "Score") %>%
+  ggplot() +
+  geom_density_ridges_gradient(aes(x = Score, y = reorder(Subject, Score),fill=..x..), scale = 1, show.legend = T) +
+  scale_fill_viridis(direction = -1) +  
+  labs(y = "Subject") +
+  ggtitle("National") +
+  theme_minimal()
+```
+
+Since Math, Physics, Chemistry and Biology are 4 natural sciences subject and vital for the option A and B. In the following analysis, we only take these 4 subjects under consideration. 
+
+To better see anomaly of the scores, we plot the distribution of the scores in Math, Physics and Chemistry by Ha Giang province and the rest of the nation side by side. 
+
+
+```{r}
+
+# subset the data by subjects specially for Ha Giang province and the rest of the nation. 
+df %>% 
+    select(Math, province) %>%
+    na.omit() %>%  
+    mutate(province = ifelse(str_detect(province,"Ha Giang"), "Ha Giang", "Others")) -> math
+
+math %>% 
+    group_by(province) %>% 
+    summarise(math_avg = mean(Math)) %>% 
+    ungroup() -> math_mean
+
+math_mean
+
+df %>% 
+    select(Physics, province) %>%
+    na.omit() %>%  
+    mutate(province = ifelse(str_detect(province,"Ha Giang"), "Ha Giang", "Others")) -> physics
+
+physics %>% 
+    group_by(province) %>% 
+    summarise(physics_avg = mean(Physics)) %>% 
+    ungroup() -> physics_mean
+
+physics_mean 
+
+df %>% 
+    select(Chemistry, province) %>%
+    na.omit() %>%  
+    mutate(province = ifelse(str_detect(province,"Ha Giang"), "Ha Giang", "Others")) -> chemistry
+
+chemistry %>% 
+    group_by(province) %>% 
+    summarise(chemistry_avg = mean(Chemistry)) %>% 
+    ungroup() -> chemistry_mean
+
+chemistry_mean 
+```
+
+
+```{r}
+my_colors <- c("#ff6343", "#376eb5")
+
+par(mfrow=c(2,2))
+
+# Math sub dataset
+math %>% 
+  ggplot(aes(Math, fill = province, color = province)) + 
+  geom_density(alpha = 0.2) -> draft
+
+# Decor our draft plot: 
+
+draft + 
+  geom_vline(data = math_mean %>% filter(province == "Ha Giang"), 
+             aes(xintercept = math_avg), linetype = "dashed", color = my_colors[1]) + 
+  geom_vline(data = math_mean %>% filter(province != "Ha Giang"), 
+             aes(xintercept = math_avg), linetype = "dashed", color = my_colors[2]) + 
+  annotate("text", label = "Unusually high", x = 8.2, y = 0.105, size = 4, hjust = -0.2, vjust = 1, color = "grey20") + 
+  annotate("curve", curvature = 0,x = 9, xend = 9, y = 0.07, yend = 0.019, arrow = arrow(angle = 20, length = unit(.3, "cm")), size = 0.3) + 
+  scale_y_continuous(labels = scales::percent, breaks = seq(0, 0.4, 0.1), expand = c(0.07, 0)) + 
+  labs(x = NULL, y = NULL, 
+       title = "Math Score Distribution by Ha Giang and Others", 
+       caption = "Data Source: Ministry of Education and Training") + 
+  theme_minimal() + 
+  theme(legend.position = "top") + 
+  theme(panel.grid = element_line(size = 0.2)) + 
+  theme(plot.title = element_text(size = 20)) + 
+  theme(axis.text = element_text(size = 13)) + 
+  theme(plot.caption = element_text(size = 10, vjust = -2, colour = "grey30", face = "italic")) + 
+  theme(plot.margin = unit(rep(1, 4), "cm")) + 
+  theme(legend.title = element_blank()) + 
+  theme(legend.text = element_text(size = 11, color = "grey30")) + 
+  theme(plot.background = element_rect(fill = NA, color = NA)) + 
+  scale_color_manual(values = my_colors) + 
+  scale_fill_manual(values = my_colors)
+
+# Physics sub dataset
+physics %>% 
+  ggplot(aes(Physics, fill = province, color = province)) + 
+  geom_density(alpha = 0.2) -> draft
+
+# Decor our draft plot: 
+
+draft + 
+  geom_vline(data = physics_mean %>% filter(province == "Ha Giang"), 
+             aes(xintercept = physics_avg), linetype = "dashed", color = my_colors[1]) + 
+  geom_vline(data = physics_mean %>% filter(province != "Ha Giang"), 
+             aes(xintercept = physics_avg), linetype = "dashed", color = my_colors[2]) + 
+  annotate("text", label = "Unusually high", x = 8.2, y = 0.105, size = 4, hjust = -0.2, vjust = 1, color = "grey20") + 
+  annotate("curve", curvature = 0,x = 9, xend = 9, y = 0.07, yend = 0.019, arrow = arrow(angle = 20, length = unit(.3, "cm")), size = 0.3) + 
+  scale_y_continuous(labels = scales::percent, breaks = seq(0, 0.4, 0.1), expand = c(0.07, 0)) + 
+  labs(x = NULL, y = NULL, 
+       title = "Physics Score Distribution by Ha Giang and Others", 
+       caption = "Data Source: Ministry of Education and Training") + 
+  theme_minimal() + 
+  theme(legend.position = "top") + 
+  theme(panel.grid = element_line(size = 0.2)) + 
+  theme(plot.title = element_text(size = 20)) + 
+  theme(axis.text = element_text(size = 13)) + 
+  theme(plot.caption = element_text(size = 10, vjust = -2, colour = "grey30", face = "italic")) + 
+  theme(plot.margin = unit(rep(1, 4), "cm")) + 
+  theme(legend.title = element_blank()) + 
+  theme(legend.text = element_text(size = 11, color = "grey30")) + 
+  theme(plot.background = element_rect(fill = NA, color = NA)) + 
+  scale_color_manual(values = my_colors) + 
+  scale_fill_manual(values = my_colors)
+
+# Chemistry sub dataset
+
+chemistry %>% 
+  ggplot(aes(Chemistry, fill = province, color = province)) + 
+  geom_density(alpha = 0.2) -> draft
+
+# Decor our draft plot: 
+draft + 
+  geom_vline(data = chemistry_mean %>% filter(province == "Ha Giang"), 
+             aes(xintercept = chemistry_avg), linetype = "dashed", color = my_colors[1]) + 
+  geom_vline(data = chemistry_mean %>% filter(province != "Ha Giang"), 
+             aes(xintercept = chemistry_avg), linetype = "dashed", color = my_colors[2]) + 
+  annotate("text", label = "Unusually high", x = 8.2, y = 0.105, size = 4, hjust = -0.2, vjust = 1, color = "grey20") + 
+  annotate("curve", curvature = 0,x = 9, xend = 9, y = 0.07, yend = 0.019, arrow = arrow(angle = 20, length = unit(.3, "cm")), size = 0.3) + 
+  scale_y_continuous(labels = scales::percent, breaks = seq(0, 0.4, 0.1), expand = c(0.07, 0)) + 
+  labs(x = NULL, y = NULL, 
+       title = "Chemistry Score Distribution by Ha Giang and Others", 
+       caption = "Data Source: Ministry of Education and Training") + 
+  theme_minimal() + 
+  theme(legend.position = "top") + 
+  theme(panel.grid = element_line(size = 0.2)) + 
+  theme(plot.title = element_text(size = 20)) + 
+  theme(axis.text = element_text(size = 13)) + 
+  theme(plot.caption = element_text(size = 10, vjust = -2, colour = "grey30", face = "italic")) + 
+  theme(plot.margin = unit(rep(1, 4), "cm")) + 
+  theme(legend.title = element_blank()) + 
+  theme(legend.text = element_text(size = 11, color = "grey30")) + 
+  theme(plot.background = element_rect(fill = NA, color = NA)) + 
+  scale_color_manual(values = my_colors) + 
+  scale_fill_manual(values = my_colors)
+
+```
+
+The above graph is the distribution of scores in Ha Giang Province. In Math, Physics, Chemistry, the density of hight score area is anomaly comparing with the nationwide distribution.
+
+
+# 2. Clustering for anomaly detection
+
+Firstly, we set an assumption. Among all subjects, Math, Physics, Chemistry and Biology have the vital role that decides the probabilities of pass the University requirements. Thus, if a student plans to continue his study in a certain university, he must invest as much as he can and evenly in 3 subjects: Math-Physics-Chemistry or Math-Chemistry-Biology (the combo Math-Physics-Chemistry is for option A and Math-Chemistry-Biology is for option B)
+
+Since Math, Physics, Chemistry and Biology are all natural science subjects, so that they all requires intellectual capabilities, study methods and exam-taking skills.
+
+For 2 reasons above, if it happens naturally, there will be high probabilities that the scores of 3/4 subjects in the combo Math/Physics/Chemistry/Biology have high correlation. 
+
+So we will filter the data of these 4 subjects for clustering.
+
+```{r}
+hg_data_mpcb = hg_data %>% 
+  select(Math, Physics, Chemistry, Biology) %>%
+  na.omit()
+head(hg_data_mpcb)
+dim(hg_data_mpcb)
+```
+
+There are about 560 students in Ha Giang take the exam on all 4 subjects. This number is sufficient for clustering.
+
+```{r}
+fviz_nbclust(hg_data_mpcb, kmeans, method = "wss") +
+  geom_vline(xintercept = 5, linetype = 2) +
+  theme_minimal()
+
+# "wss" for total within sum of square. Measures the squared average distance of all the points within a cluster to the cluster centroid
+
+```
+
+From the elbow graph above, we choose number of cluster = 5.This number is the only subjective number in this experiment.
+
+```{r}
+set.seed(2)
+km <- kmeans(hg_data_mpcb, 5, nstart = 25) # nstart = 25: generates 25 initial configurations
+
+```
+
+
+```{r}
+fviz_cluster(km,
+             data = hg_data_mpcb,
+             ellipse.type = "t", 
+             ggtheme = theme_minimal()
+             )
+```
+
+To understand more about each cluster, we calculate the mode of 4 subjects for each cluster.
+
+```{r}
+getmode <- function(v) {
+  uniqv <- unique(v)
+  uniqv[which.max(tabulate(match(v, uniqv)))]
+}
+
+# each cluster by mode
+aggregate(hg_data_mpcb, by = list(clt = km$cluster), getmode)
+
+```
+
+
+```{r}
+# each cluster by mean
+aggregate(hg_data_mpcb, by = list(clt = km$cluster), mean)
+
+```
+
+We can see some insights from these 2 tables:
+
+1. Cluster 1 has very high Math-Physics-Chemistry score but low Biology score. This cluster seemingly represents for the group of students who take option A (option A require the scores of 3 subject Math-Physics-Chemistry). This could be but not so suspicious, because these students may only focus on the subjects of their first option (option A)
+
+2. Cluster 2 is the most suspicious because of the strange combination. The Math and Physics scores are very high while Chemistry and Biology scores are very low. 
+
+3. Cluster 3 is corresponding to the group of average students. The scores of 4 subjects in this cluster range from average to pretty level.
+
+4. Cluster 4 includes some bad performing students with low scores in all 4 subjects. This cluster is the outliers in the dataset but suggest no suspiciousness in this case.
+
+5. Cluster 5 also represents the group of average students with the scores of 4 subjects are under 5. We can exclude cluster 4 & 5 from suspicion.
+
+```{r}
+# the distribution of each subject score in 5 clusters.
+hg_data_mpcb %>% mutate(clt = factor(km$cluster)) %>%
+  gather(Math : Biology, key = "Exam", value = "Score") %>%
+  ggplot() +
+  facet_wrap(~clt, ncol = 2) +
+  coord_flip() +
+  scale_fill_brewer(palette = "Greens", direction = -1) +
+  geom_lv(mapping = aes(x = Exam, y = Score, fill = ..LV..), col = "black", show.legend = F,) +
+  theme_gray()
+```
+
+One of the major drawbacks of K-Means is its naive use of the mean value for the cluster center. Gaussian Mixture Models (GMMs) give us more flexibility than K-Means. With GMMs we assume that the data points are Gaussian distributed; this is a less restrictive assumption than saying they are circular by using the mean.
+
+Thus, in addition to using K-Means, we will also implement GMM clustering to see the result.
+
+```{r}
+opt_gmm = Optimal_Clusters_GMM(hg_data_mpcb, max_clusters = 10, criterion = "BIC", dist_mode = "maha_dist", seed_mode = "random_subset", km_iter = 10, em_iter = 10, var_floor = 1e-10, plot_data = T)
+```
+
+
+```{r}
+set.seed(2)
+gmm <- Mclust(hg_data_mpcb, 5)
+```
+
+
+```{r}
+fviz_cluster(gmm, hg_data_mpcb,
+             main="Plot XXI: Gaussian mixture model (GMM)",
+             labelsize = 8) + 
+  theme_bw()
+```
+
+```{r}
+# each cluster by mode
+aggregate(hg_data_mpcb, by = list(clt = gmm$classification), getmode)
+
+```
+
+```{r}
+# each cluster by mean
+aggregate(hg_data_mpcb, by = list(clt = gmm$classification), mean)
+```
+
+GMM clustering acquires a similar result to K-Means clustering. We have 2 suspicious clusters. 
+
+
+# 3. Detect/Isolate the anomaly 
+
+For anomaly detection, we can also use one out of two or combine two ways:
+    1. Using K-mean clustering result from above
+    2. Calculate the distance. We can use both Euclidean and Manhattan distance. For high dimensional vectors, we might find that Manhattan works better than the Euclidean distance.
+
+    
+    # https://www.quora.com/What-is-the-difference-between-Manhattan-and-Euclidean-distance-measures
+
+```{r}
+# Euclidean distance
+hg_data_mpcb %>%
+  get_dist(method = "euclidean") %>%
+  fviz_dist(gradient = list(low = "white", mid = "orange", high = "red")) +
+  scale_x_discrete(labels = NULL, breaks = NULL) +
+  scale_y_discrete(labels = NULL, breaks = NULL) +
+  coord_equal() +
+  ggtitle("Euclidean distance")
+```
+
+
+```{r}
+# Manhattan distance
+hg_data_mpcb %>%
+  get_dist(method = "manhattan") %>%
+  fviz_dist(gradient = list(low = "white", mid = "gray", high = "red")) +
+  scale_x_discrete(labels = NULL, breaks = NULL) +
+  scale_y_discrete(labels = NULL, breaks = NULL) +
+  coord_equal() +
+  ggtitle("Manhattan distance")
+```
+
+From these two plots above, the darkest areas are corresponding with the students who are considered outliers. There scores can be very high or very low comparing with other around observations.
+
+
+```{r}
+# centers of kmean clusters from above 
+centers <- km$centers[km$cluster, ]
+# calucate distances from other observations to the centers
+distances <- sqrt(rowSums((hg_data_mpcb - centers) ^ 2))
+# take out 30 observations have the largest distances from the centers
+outliers <- order(distances, decreasing = TRUE)[1:30]
+
+plot_df <- mutate(hg_data_mpcb, clt=factor(km$cluster))
+# take out 30 outliers
+out_df <- plot_df %>% .[outliers,]
+```
+
+
+
+```{r}
+par(mfrow=c(2,2))
+# plot the outliers corresponding with clusters in Math and Physics
+ggplot() +
+  geom_point(data = plot_df, aes(x = Math, y = Physics, col = clt), alpha = 0.5) +
+  geom_point(data = as.data.frame(km$centers), aes(x = Math, y = Physics, col = factor(c(1 : 5))), shape = 15, size = 5) +
+  geom_point(data = out_df, aes(x = Math, y = Physics), shape = 21, size = 6, stroke = 1, col = "red", alpha = 0.9) +
+  theme_minimal()
+
+# plot the outliers corresponding with clusters in Math and Chemistry
+ggplot() +
+  geom_point(data = plot_df, aes(x = Math, y = Chemistry, col = clt), alpha = 0.5) +
+  geom_point(data = as.data.frame(km$centers), aes(x = Math, y = Chemistry, col = factor(c(1 : 5))), shape = 15, size = 5) +
+  geom_point(data = out_df, aes(x = Math, y = Chemistry), shape = 21, size = 6, stroke = 1, col = "red", alpha = 0.9) +
+  theme_minimal()
+
+# plot the outliers corresponding with clusters in Math and Biology
+ggplot() +
+  geom_point(data = plot_df, aes(x = Math, y = Biology, col = clt), alpha = 0.5) +
+  geom_point(data = as.data.frame(km$centers), aes(x = Math, y = Biology, col = factor(c(1 : 5))), shape = 15, size = 5) +
+  geom_point(data = out_df, aes(x = Math, y = Biology), shape = 21, size = 6, stroke = 1, col = "red", alpha = 0.9) +
+  theme_minimal()
+```
+
+We can also isolate cluster 1 and cluster 2, which is said to be highly suspicious from the above. 
+
+```{r}
+outliers <- order(distances, decreasing = TRUE)[1:500]
+out_df <- plot_df %>% .[outliers, ] %>%
+  filter(clt == "1" | clt == "2")
+
+dim(out_df)
+```
+
+
+```{r}
+par(mfrow=c(2,2))
+# plot the outliers in cluster 5 and cluster 3 by Math and Physics
+ggplot() +
+  geom_point(data = plot_df, aes(x = Math, y = Physics, col = clt), alpha = 0.5) +
+  geom_point(data = as.data.frame(km$centers), aes(x = Math, y = Physics, col = factor(c(1:5))), shape = 15, size = 5) +
+  geom_point(data = out_df, aes(x = Math, y = Physics), shape = 23, size = 6, stroke = 1, col = "blue", alpha = 0.9) +
+  theme_gray()
+
+# plot the outliers in cluster 5 and cluster 3 by Math and Chemistry
+ggplot() +
+  geom_point(data = plot_df, aes(x = Math, y = Chemistry, col = clt), alpha = 0.5) +
+  geom_point(data = as.data.frame(km$centers), aes(x = Math, y = Chemistry, col = factor(c(1:5))), shape = 15, size = 5) +
+  geom_point(data = out_df, aes(x = Math, y = Chemistry), shape = 23, size = 6, stroke = 1, col = "blue", alpha = 0.9) +
+  theme_gray()
+
+# plot the outliers in cluster 5 and cluster 3 by Math and Biology
+ggplot() +
+  geom_point(data = plot_df, aes(x = Math, y = Biology, col = clt), alpha = 0.5) +
+  geom_point(data = as.data.frame(km$centers), aes(x = Math, y = Biology, col = factor(c(1:5))), shape = 15, size = 5) +
+  geom_point(data = out_df, aes(x = Math, y = Biology), shape = 23, size = 6, stroke = 1, col = "blue", alpha = 0.9) +
+  theme_gray()
+
+# plot the outliers in cluster 5 and cluster 3 by Chemistry and Biology
+ggplot() +
+  geom_point(data = plot_df, aes(x = Chemistry, y = Biology, col = clt), alpha = 0.5) +
+  geom_point(data = as.data.frame(km$centers), aes(x = Chemistry, y = Biology, col = factor(c(1:5))), shape = 15, size = 5) +
+  geom_point(data = out_df, aes(x = Chemistry, y = Biology), shape = 23, size = 6, stroke = 1, col = "blue", alpha = 0.9) +
+  theme_gray()
+```
+
+# 4. Conclusion
+By using some statistical and data visualization methods, as well as unsupervised clustering, we can use data to detect the outliers and anomalies. 
+
+The advantage of K-mean clustering is the objectivity, that does not depend on any subjective assumption of investigators. The method is different from hypothesis testing or inferring based on graph visualization. The inference is only after the clustering result.
+The methods mentions above of course do not conclude anything about the interference or cheating but can stake the suspicion. 
+
+```{r}
+```
+
+
+```{r}
+```
